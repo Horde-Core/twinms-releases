@@ -1,0 +1,105 @@
+name: Build installer
+
+# Builds the full TwinMS client installer and publishes it to THIS repo's Releases
+# (the feed electron-updater follows). It combines three things:
+#   • twinms-frontend             — checked out + built here (owns the Electron shell + packaging)
+#   • backend.zip + db-backup.zip — the newest PRERELEASE published by twinms-backend
+#   • Mongo/Node/VC++ binaries     — fetched by the app's setup-local-stack.ps1 -BinariesOnly
+#
+# Manual for now (workflow_dispatch). Later: add `repository_dispatch` so a frontend or
+# backend push triggers it automatically.
+#
+# Required secret (repo or org):
+#   ORCHESTRATOR_TOKEN — fine-grained PAT with
+#                          • Contents: READ        on Horde-Core/twinms-frontend
+#                          • Contents: READ & WRITE on Horde-Core/twinms-releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      frontend_ref:
+        description: "twinms-frontend ref to build (branch / tag / SHA)"
+        required: false
+        default: main
+      version:
+        description: "Installer version (semver, e.g. 0.2.0). Blank = keep package.json's."
+        required: false
+
+concurrency:
+  group: build-installer
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # GitHub-hosted Windows. Switch to [self-hosted, windows] to reuse the backend's
+    # runner (free minutes + you can cache vendor/ on disk between runs).
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out twinms-frontend
+        uses: actions/checkout@v4
+        with:
+          repository: Horde-Core/twinms-frontend
+          ref: ${{ github.event.inputs.frontend_ref || 'main' }}
+          token: ${{ secrets.ORCHESTRATOR_TOKEN }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Download newest backend artifacts (latest prerelease)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.ORCHESTRATOR_TOKEN }}
+        run: |
+          $rels = gh release list --repo Horde-Core/twinms-releases --limit 100 --json tagName,createdAt | ConvertFrom-Json
+          # Backend artifacts are tagged release-<timestamp>. (They're also marked prerelease so
+          # clients ignore them, but we match by tag prefix here so this works regardless of that flag.)
+          $tag = ($rels | Where-Object { $_.tagName -like 'release-*' } |
+                  Sort-Object createdAt -Descending | Select-Object -First 1).tagName
+          if (-not $tag) { throw "No backend prerelease (release-*) found in twinms-releases." }
+          Write-Host "Backend artifacts from: $tag"
+          gh release download $tag --repo Horde-Core/twinms-releases `
+            --pattern backend.zip --pattern db-backup.zip --dir _artifacts --clobber
+
+      - name: Unpack backend + snapshot
+        shell: pwsh
+        run: |
+          Expand-Archive _artifacts\backend.zip   -DestinationPath _backend  -Force  # dist + config + package.json (+lock)
+          Expand-Archive _artifacts\db-backup.zip -DestinationPath _snapshot -Force  # dump/ + snapshot.version
+
+      - name: Fetch vendor binaries (mongod / mongorestore / node / VC++ DLLs)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\setup-local-stack.ps1 -BinariesOnly
+
+      - name: Install deps + build frontend
+        shell: pwsh
+        run: |
+          npm ci
+          npm run build   # next build -> out/
+
+      - name: Stamp version (optional)
+        if: ${{ github.event.inputs.version != '' }}
+        shell: pwsh
+        run: npm version ${{ github.event.inputs.version }} --no-git-tag-version --allow-same-version
+
+      - name: Assemble stack (stage prebuilt backend + snapshot into vendor/)
+        shell: pwsh
+        env:
+          TWINMS_BACKEND_DIR: ${{ github.workspace }}\_backend
+          TWINMS_SEED_DIR: ${{ github.workspace }}\_snapshot
+        run: node scripts/assemble-stack.js
+
+      - name: Build + publish installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.ORCHESTRATOR_TOKEN }}
+        run: npx electron-builder --win --publish always
+
+      - name: Show output
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -Filter *.exe -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host ("{0}  ({1:N0} MB)" -f $_.Name, ($_.Length / 1MB)) }
