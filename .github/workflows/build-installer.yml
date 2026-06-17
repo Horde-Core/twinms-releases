@@ -6,8 +6,8 @@ name: Build installer
 #   • backend.zip + db-backup.zip — the newest PRERELEASE published by twinms-backend
 #   • Mongo/Node/VC++ binaries     — fetched by the app's setup-local-stack.ps1 -BinariesOnly
 #
-# Manual for now (workflow_dispatch). Later: add `repository_dispatch` so a frontend or
-# backend push triggers it automatically.
+# Triggers: workflow_dispatch (manual) + repository_dispatch (auto) — fired by a
+# twinms-frontend push (frontend-push) or a new twinms-backend release (backend-release).
 #
 # Required secret (repo or org):
 #   ORCHESTRATOR_TOKEN — fine-grained PAT with
@@ -22,8 +22,10 @@ on:
         required: false
         default: master
       version:
-        description: "Installer version (semver, e.g. 0.2.0). Blank = keep package.json's."
+        description: "Installer version (semver, e.g. 0.5.0). Blank = auto patch-bump."
         required: false
+  repository_dispatch:
+    types: [frontend-push, backend-release]
 
 concurrency:
   group: build-installer
@@ -100,10 +102,31 @@ jobs:
           npm ci
           npm run build   # next build -> out/
 
-      - name: Stamp version (optional)
-        if: ${{ github.event.inputs.version != '' }}
+      # Decide the version to publish. A manual workflow_dispatch input wins; otherwise
+      # auto patch-bump from the latest published v* release (the very first release
+      # falls back to package.json's version). electron-updater needs strictly-increasing
+      # semver, so every build gets a fresh, higher version.
+      - name: Resolve + stamp version
         shell: pwsh
-        run: npm version ${{ github.event.inputs.version }} --no-git-tag-version --allow-same-version
+        env:
+          GH_TOKEN: ${{ secrets.ORCHESTRATOR_TOKEN }}
+        run: |
+          $ver = "${{ github.event.inputs.version }}"
+          if (-not $ver) {
+            $rels = gh release list --repo Horde-Core/twinms-releases --limit 100 --json tagName | ConvertFrom-Json
+            $vers = $rels.tagName |
+              Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
+              ForEach-Object { [version]($_.TrimStart('v')) } |
+              Sort-Object -Descending
+            if ($vers) {
+              $l = @($vers)[0]
+              $ver = "{0}.{1}.{2}" -f $l.Major, $l.Minor, ($l.Build + 1)
+            } else {
+              $ver = (Get-Content package.json -Raw | ConvertFrom-Json).version
+            }
+          }
+          Write-Host "Publishing version: $ver"
+          npm version $ver --no-git-tag-version --allow-same-version
 
       - name: Assemble stack (stage prebuilt backend + snapshot into vendor/)
         shell: pwsh
