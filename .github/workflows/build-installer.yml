@@ -48,20 +48,41 @@ jobs:
         with:
           node-version: "20"
 
+      # node-window-manager (and its dep extract-file-icon) are native addons that
+      # compile via node-gyp on install. The hosted runner's automatic Visual Studio
+      # detection can fail ("could not find a version of Visual Studio 2017 or newer"),
+      # so wire up the build toolchain explicitly before `npm ci`:
+      #   • Python 3.12 — node-gyp's gyp scripts (the runner default 3.14 is too new)
+      #   • MSVC dev env — exports VCINSTALLDIR so node-gyp uses that compiler directly
+      - name: Set up Python for node-gyp
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up MSVC toolchain (for native node addons)
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Download newest backend artifacts (latest prerelease)
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.ORCHESTRATOR_TOKEN }}
         run: |
           $rels = gh release list --repo Horde-Core/twinms-releases --limit 100 --json tagName,createdAt | ConvertFrom-Json
-          # Backend artifacts are tagged release-<timestamp>. (They're also marked prerelease so
-          # clients ignore them, but we match by tag prefix here so this works regardless of that flag.)
-          $tag = ($rels | Where-Object { $_.tagName -like 'release-*' } |
-                  Sort-Object createdAt -Descending | Select-Object -First 1).tagName
-          if (-not $tag) { throw "No backend prerelease (release-*) found in twinms-releases." }
+          # Backend artifacts are tagged release-<timestamp> (marked prerelease so clients ignore them).
+          # Pick the NEWEST such release that actually has BOTH assets — a backend run can occasionally
+          # publish only one (e.g. a failed snapshot), and we must not try to build from an incomplete one.
+          $tag = $null
+          foreach ($r in ($rels | Where-Object { $_.tagName -like 'release-*' } | Sort-Object createdAt -Descending)) {
+            $names = (gh release view $r.tagName --repo Horde-Core/twinms-releases --json assets | ConvertFrom-Json).assets.name
+            if (($names -contains 'backend.zip') -and ($names -contains 'db-backup.zip')) { $tag = $r.tagName; break }
+          }
+          if (-not $tag) { throw "No release-* with BOTH backend.zip and db-backup.zip found in twinms-releases." }
           Write-Host "Backend artifacts from: $tag"
           gh release download $tag --repo Horde-Core/twinms-releases `
             --pattern backend.zip --pattern db-backup.zip --dir _artifacts --clobber
+          if (-not (Test-Path _artifacts\backend.zip) -or -not (Test-Path _artifacts\db-backup.zip)) {
+            throw "Expected backend.zip and db-backup.zip in _artifacts after download."
+          }
 
       - name: Unpack backend + snapshot
         shell: pwsh
@@ -90,6 +111,21 @@ jobs:
           TWINMS_BACKEND_DIR: ${{ github.workspace }}\_backend
           TWINMS_SEED_DIR: ${{ github.workspace }}\_snapshot
         run: node scripts/assemble-stack.js
+
+      # Embed the CLIENT update token so the installed app can read this PRIVATE feed.
+      # This is a SEPARATE, read-only PAT (Contents: read on twinms-releases only) — NOT
+      # the orchestrator token. It's written into electron/update-token.js (gitignored)
+      # right before packaging, so it ships inside the app but never lives in source.
+      - name: Inject read-only update token (embedded in the app)
+        shell: pwsh
+        env:
+          UPDATE_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+        run: |
+          if (-not $env:UPDATE_TOKEN) {
+            throw "UPDATE_TOKEN secret is missing. Create a fine-grained PAT with Contents: read on Horde-Core/twinms-releases and add it as the UPDATE_TOKEN secret."
+          }
+          Set-Content -NoNewline -Path electron/update-token.js -Value "module.exports = '$($env:UPDATE_TOKEN)';"
+          Write-Host "Wrote electron/update-token.js (read-only client update token embedded)"
 
       - name: Build + publish installer
         shell: pwsh
