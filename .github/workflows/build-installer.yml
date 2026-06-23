@@ -3,7 +3,8 @@ name: Build installer
 # Builds the full TwinMS client installer and publishes it to THIS repo's Releases
 # (the feed electron-updater follows). It combines three things:
 #   • twinms-frontend             — checked out + built here (owns the Electron shell + packaging)
-#   • backend.zip + db-backup.zip — the newest PRERELEASE published by twinms-backend
+#   • backend.zip + db-backup*.zip — the newest PRERELEASE by twinms-backend (the DB snapshot is
+#                                     split across one or more db-backup* assets to stay < GitHub's 2 GB/asset)
 #   • Mongo/Node/VC++ binaries     — fetched by the app's setup-local-stack.ps1 -BinariesOnly
 #
 # Triggers: workflow_dispatch (manual) + repository_dispatch (auto) — fired by a
@@ -76,21 +77,39 @@ jobs:
           $tag = $null
           foreach ($r in ($rels | Where-Object { $_.tagName -like 'release-*' } | Sort-Object createdAt -Descending)) {
             $names = (gh release view $r.tagName --repo Horde-Core/twinms-releases --json assets | ConvertFrom-Json).assets.name
-            if (($names -contains 'backend.zip') -and ($names -contains 'db-backup.zip')) { $tag = $r.tagName; break }
+            # The DB snapshot ships as one OR MORE assets named db-backup* (e.g. db-backup.zip +
+            # db-backup-telemetry.zip), split so each stays under GitHub's 2 GB-per-asset cap.
+            # Require backend.zip plus at least one db-backup* asset so we never build from a
+            # half-published release.
+            $hasDbBackup = @($names | Where-Object { $_ -like 'db-backup*' }).Count -gt 0
+            if (($names -contains 'backend.zip') -and $hasDbBackup) { $tag = $r.tagName; break }
           }
-          if (-not $tag) { throw "No release-* with BOTH backend.zip and db-backup.zip found in twinms-releases." }
+          if (-not $tag) { throw "No release-* with backend.zip and at least one db-backup* asset found in twinms-releases." }
           Write-Host "Backend artifacts from: $tag"
+          # Glob patterns pull backend.zip plus EVERY db-backup* asset (however many there are).
           gh release download $tag --repo Horde-Core/twinms-releases `
-            --pattern backend.zip --pattern db-backup.zip --dir _artifacts --clobber
-          if (-not (Test-Path _artifacts\backend.zip) -or -not (Test-Path _artifacts\db-backup.zip)) {
-            throw "Expected backend.zip and db-backup.zip in _artifacts after download."
+            --pattern backend.zip --pattern 'db-backup*' --dir _artifacts --clobber
+          $dbAssets = @(Get-ChildItem _artifacts -Filter 'db-backup*.zip' -ErrorAction SilentlyContinue)
+          if (-not (Test-Path _artifacts\backend.zip) -or $dbAssets.Count -eq 0) {
+            throw "Expected backend.zip and at least one db-backup*.zip in _artifacts after download."
           }
+          Write-Host "Snapshot assets: $($dbAssets.Name -join ', ')"
 
       - name: Unpack backend + snapshot
         shell: pwsh
         run: |
-          Expand-Archive _artifacts\backend.zip   -DestinationPath _backend  -Force  # dist + config + package.json (+lock)
-          Expand-Archive _artifacts\db-backup.zip -DestinationPath _snapshot -Force  # dump/ + snapshot.version
+          Expand-Archive _artifacts\backend.zip -DestinationPath _backend -Force  # dist + config + package.json (+lock)
+          # Extract EVERY db-backup* asset into the SAME _snapshot dir so they merge into one tree:
+          #   db-backup.zip           -> dump/ + snapshot.version  (core data)
+          #   db-backup-telemetry.zip -> dump-telemetry/           (telemetries only)
+          # restore.ts runs mongorestore once per dump*/ dir; adding more db-backup* assets needs no change here.
+          Get-ChildItem _artifacts -Filter 'db-backup*.zip' | ForEach-Object {
+            Write-Host "Expanding snapshot asset: $($_.Name)"
+            Expand-Archive $_.FullName -DestinationPath _snapshot -Force
+          }
+          if (-not (Test-Path _snapshot\dump)) {
+            throw "No dump/ found in _snapshot after extracting db-backup* assets (core snapshot missing?)."
+          }
 
       - name: Fetch vendor binaries (mongod / mongorestore / node / VC++ DLLs)
         shell: pwsh
