@@ -3,8 +3,8 @@ name: Build installer
 # Builds the full TwinMS client installer and publishes it to THIS repo's Releases
 # (the feed electron-updater follows). It combines three things:
 #   • twinms-frontend             — checked out + built here (owns the Electron shell + packaging)
-#   • backend.zip + db-backup*.zip — the newest release-* in the twinms-backend repo (the DB snapshot is
-#                                     split across one or more db-backup* assets to stay < GitHub's 2 GB/asset)
+#   • backend.zip                  — from the newest release-* in the twinms-backend repo. The DB snapshot
+#                                     (db-backup*) is NOT bundled — the client downloads it on first run.
 #   • Mongo/Node/VC++ binaries     — fetched by the app's setup-local-stack.ps1 -BinariesOnly
 #
 # Triggers: workflow_dispatch (manual) + repository_dispatch (auto) — fired by a
@@ -66,52 +66,33 @@ jobs:
       - name: Set up MSVC toolchain (for native node addons)
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Download newest backend artifacts (from twinms-backend)
+      - name: Download newest backend build (backend.zip only)
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.ORCHESTRATOR_TOKEN }}
         run: |
           $rels = gh release list --repo Horde-Core/twinms-backend --limit 100 --json tagName,createdAt | ConvertFrom-Json
-          # Backend artifacts live in the twinms-backend repo, tagged release-<timestamp>. Keeping them
-          # there (not in twinms-releases) leaves the app's release feed clean — only v* installers.
-          # Pick the NEWEST such release that actually has ALL its assets — a backend run can occasionally
-          # publish only some (e.g. a failed snapshot), and we must not build from an incomplete one.
+          # The installer only needs backend.zip (the bundled backend code). The DB snapshot (db-backup*)
+          # is downloaded by the CLIENT on first run, NOT embedded. We still require the chosen release to
+          # ALSO carry the db-backup* assets — so we only build from a COMPLETE release the client can later
+          # restore from — but we download backend.zip alone.
           $tag = $null
           foreach ($r in ($rels | Where-Object { $_.tagName -like 'release-*' } | Sort-Object createdAt -Descending)) {
             $names = (gh release view $r.tagName --repo Horde-Core/twinms-backend --json assets | ConvertFrom-Json).assets.name
-            # The DB snapshot ships as one OR MORE assets named db-backup* (e.g. db-backup.zip +
-            # db-backup-telemetry.zip), split so each stays under GitHub's 2 GB-per-asset cap.
-            # Require backend.zip plus at least one db-backup* asset so we never build from a
-            # half-published release.
             $hasDbBackup = @($names | Where-Object { $_ -like 'db-backup*' }).Count -gt 0
             if (($names -contains 'backend.zip') -and $hasDbBackup) { $tag = $r.tagName; break }
           }
-          if (-not $tag) { throw "No release-* with backend.zip and at least one db-backup* asset found in twinms-backend." }
-          Write-Host "Backend artifacts from twinms-backend: $tag"
-          # Glob patterns pull backend.zip plus EVERY db-backup* asset (however many there are).
-          gh release download $tag --repo Horde-Core/twinms-backend `
-            --pattern backend.zip --pattern 'db-backup*' --dir _artifacts --clobber
-          $dbAssets = @(Get-ChildItem _artifacts -Filter 'db-backup*.zip' -ErrorAction SilentlyContinue)
-          if (-not (Test-Path _artifacts\backend.zip) -or $dbAssets.Count -eq 0) {
-            throw "Expected backend.zip and at least one db-backup*.zip in _artifacts after download."
+          if (-not $tag) { throw "No release-* with backend.zip + db-backup* found in twinms-backend." }
+          Write-Host "Backend build from twinms-backend: $tag (db-backup* left for the client to download)"
+          gh release download $tag --repo Horde-Core/twinms-backend --pattern backend.zip --dir _artifacts --clobber
+          if (-not (Test-Path _artifacts\backend.zip)) {
+            throw "Expected backend.zip in _artifacts after download."
           }
-          Write-Host "Snapshot assets: $($dbAssets.Name -join ', ')"
 
-      - name: Unpack backend + snapshot
+      - name: Unpack backend
         shell: pwsh
         run: |
           Expand-Archive _artifacts\backend.zip -DestinationPath _backend -Force  # dist + config + package.json (+lock)
-          # Extract EVERY db-backup* asset into the SAME _snapshot dir so they merge into one tree:
-          #   db-backup.zip           -> dump/ + snapshot.version  (core data)
-          #   db-backup-telemetry.zip -> dump-telemetry/           (telemetries only)
-          # restore.ts runs mongorestore once per dump*/ dir; adding more db-backup* assets needs no change here.
-          Get-ChildItem _artifacts -Filter 'db-backup*.zip' | ForEach-Object {
-            Write-Host "Expanding snapshot asset: $($_.Name)"
-            Expand-Archive $_.FullName -DestinationPath _snapshot -Force
-          }
-          if (-not (Test-Path _snapshot\dump)) {
-            throw "No dump/ found in _snapshot after extracting db-backup* assets (core snapshot missing?)."
-          }
 
       - name: Fetch vendor binaries (mongod / mongorestore / node / VC++ DLLs)
         shell: pwsh
@@ -149,11 +130,10 @@ jobs:
           Write-Host "Publishing version: $ver"
           npm version $ver --no-git-tag-version --allow-same-version
 
-      - name: Assemble stack (stage prebuilt backend + snapshot into vendor/)
+      - name: Assemble stack (stage prebuilt backend + binaries into vendor/)
         shell: pwsh
         env:
           TWINMS_BACKEND_DIR: ${{ github.workspace }}\_backend
-          TWINMS_SEED_DIR: ${{ github.workspace }}\_snapshot
         run: node scripts/assemble-stack.js
 
       # Embed the CLIENT update token so the installed app can read this PRIVATE feed.
