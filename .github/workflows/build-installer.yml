@@ -3,7 +3,7 @@ name: Build installer
 # Builds the full TwinMS client installer and publishes it to THIS repo's Releases
 # (the feed electron-updater follows). It combines three things:
 #   • twinms-frontend             — checked out + built here (owns the Electron shell + packaging)
-#   • backend.zip + db-backup*.zip — the newest PRERELEASE by twinms-backend (the DB snapshot is
+#   • backend.zip + db-backup*.zip — the newest release-* in the twinms-backend repo (the DB snapshot is
 #                                     split across one or more db-backup* assets to stay < GitHub's 2 GB/asset)
 #   • Mongo/Node/VC++ binaries     — fetched by the app's setup-local-stack.ps1 -BinariesOnly
 #
@@ -13,6 +13,7 @@ name: Build installer
 # Required secret (repo or org):
 #   ORCHESTRATOR_TOKEN — fine-grained PAT with
 #                          • Contents: READ        on Horde-Core/twinms-frontend
+#                          • Contents: READ        on Horde-Core/twinms-backend   (backend.zip + db-backup* live here now)
 #                          • Contents: READ & WRITE on Horde-Core/twinms-releases
 
 on:
@@ -65,18 +66,19 @@ jobs:
       - name: Set up MSVC toolchain (for native node addons)
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Download newest backend artifacts (latest prerelease)
+      - name: Download newest backend artifacts (from twinms-backend)
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.ORCHESTRATOR_TOKEN }}
         run: |
-          $rels = gh release list --repo Horde-Core/twinms-releases --limit 100 --json tagName,createdAt | ConvertFrom-Json
-          # Backend artifacts are tagged release-<timestamp> (marked prerelease so clients ignore them).
-          # Pick the NEWEST such release that actually has BOTH assets — a backend run can occasionally
-          # publish only one (e.g. a failed snapshot), and we must not try to build from an incomplete one.
+          $rels = gh release list --repo Horde-Core/twinms-backend --limit 100 --json tagName,createdAt | ConvertFrom-Json
+          # Backend artifacts live in the twinms-backend repo, tagged release-<timestamp>. Keeping them
+          # there (not in twinms-releases) leaves the app's release feed clean — only v* installers.
+          # Pick the NEWEST such release that actually has ALL its assets — a backend run can occasionally
+          # publish only some (e.g. a failed snapshot), and we must not build from an incomplete one.
           $tag = $null
           foreach ($r in ($rels | Where-Object { $_.tagName -like 'release-*' } | Sort-Object createdAt -Descending)) {
-            $names = (gh release view $r.tagName --repo Horde-Core/twinms-releases --json assets | ConvertFrom-Json).assets.name
+            $names = (gh release view $r.tagName --repo Horde-Core/twinms-backend --json assets | ConvertFrom-Json).assets.name
             # The DB snapshot ships as one OR MORE assets named db-backup* (e.g. db-backup.zip +
             # db-backup-telemetry.zip), split so each stays under GitHub's 2 GB-per-asset cap.
             # Require backend.zip plus at least one db-backup* asset so we never build from a
@@ -84,10 +86,10 @@ jobs:
             $hasDbBackup = @($names | Where-Object { $_ -like 'db-backup*' }).Count -gt 0
             if (($names -contains 'backend.zip') -and $hasDbBackup) { $tag = $r.tagName; break }
           }
-          if (-not $tag) { throw "No release-* with backend.zip and at least one db-backup* asset found in twinms-releases." }
-          Write-Host "Backend artifacts from: $tag"
+          if (-not $tag) { throw "No release-* with backend.zip and at least one db-backup* asset found in twinms-backend." }
+          Write-Host "Backend artifacts from twinms-backend: $tag"
           # Glob patterns pull backend.zip plus EVERY db-backup* asset (however many there are).
-          gh release download $tag --repo Horde-Core/twinms-releases `
+          gh release download $tag --repo Horde-Core/twinms-backend `
             --pattern backend.zip --pattern 'db-backup*' --dir _artifacts --clobber
           $dbAssets = @(Get-ChildItem _artifacts -Filter 'db-backup*.zip' -ErrorAction SilentlyContinue)
           if (-not (Test-Path _artifacts\backend.zip) -or $dbAssets.Count -eq 0) {
