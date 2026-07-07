@@ -10,10 +10,11 @@ name: Build installer
 # Triggers: workflow_dispatch (manual) + repository_dispatch (auto) — fired by a
 # twinms-frontend push (frontend-push) or a new twinms-backend release (backend-release).
 #
-# Channels: auto-triggered (repository_dispatch) builds ALWAYS publish to the dev
-# channel — a GitHub PRErelease with an x.y.z-dev.N version that only dev installs
-# (whose own version has a -dev suffix) pick up. Production clients only ever see
-# full releases, which require a MANUAL run with channel=prod.
+# Channels: manual runs pick via the "channel" input. Auto builds map the SOURCE
+# BRANCH to a channel: frontend push to master → prod (full release, all clients
+# auto-update); push to develop → develop channel (GitHub PRErelease, x.y.z-dev.N —
+# only installs whose own version has a -dev suffix follow it). backend-release
+# dispatches → develop; prod picks up the newest backend.zip at its next build.
 #
 # Required secret (repo or org):
 #   ORCHESTRATOR_TOKEN — fine-grained PAT with
@@ -57,7 +58,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Horde-Core/twinms-frontend
-          ref: ${{ github.event.inputs.frontend_ref || 'master' }}
+          ref: ${{ github.event.inputs.frontend_ref || github.event.client_payload.ref || 'master' }}
           token: ${{ secrets.ORCHESTRATOR_TOKEN }}
 
       - name: Set up Node
@@ -126,9 +127,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ORCHESTRATOR_TOKEN }}
         run: |
-          # Channel: manual input wins; auto-triggered (repository_dispatch) builds are always dev.
+          # Channel: manual input wins; auto builds map source branch → channel
+          # (frontend push to master → prod; develop pushes + backend releases → develop).
           $channel = "${{ github.event.inputs.channel }}"
-          if (-not $channel) { $channel = "dev" }
+          if (-not $channel) {
+            $srcRef = "${{ github.event.client_payload.ref }}"   # set by frontend-push; empty for backend-release
+            $channel = if ($srcRef -eq 'master') { 'prod' } else { 'develop' }
+          }
           $ver = "${{ github.event.inputs.version }}"
           if (-not $ver) {
             $rels = gh release list --repo Horde-Core/twinms-releases --limit 100 --json tagName | ConvertFrom-Json
@@ -143,13 +148,13 @@ jobs:
               $ver = (Get-Content package.json -Raw | ConvertFrom-Json).version
             }
           }
-          if ($channel -eq 'dev' -and $ver -notmatch '-') {
+          if ($channel -eq 'develop' -and $ver -notmatch '-') {
             # The -dev suffix IS the channel switch: auto-update.js enables allowPrerelease
             # only when the installed version has one. run_number keeps successive dev builds
             # strictly increasing; the eventual prod x.y.z supersedes all its x.y.z-dev.N.
             $ver = "$ver-dev.${{ github.run_number }}"
           }
-          if ($channel -eq 'dev') {
+          if ($channel -eq 'develop') {
             # Read by electron-builder's GitHub publisher in the publish step below:
             # forces the release to be created as a PRErelease (invisible to prod clients).
             Add-Content $env:GITHUB_ENV 'EP_PRE_RELEASE=true'
