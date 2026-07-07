@@ -10,6 +10,11 @@ name: Build installer
 # Triggers: workflow_dispatch (manual) + repository_dispatch (auto) — fired by a
 # twinms-frontend push (frontend-push) or a new twinms-backend release (backend-release).
 #
+# Channels: auto-triggered (repository_dispatch) builds ALWAYS publish to the dev
+# channel — a GitHub PRErelease with an x.y.z-dev.N version that only dev installs
+# (whose own version has a -dev suffix) pick up. Production clients only ever see
+# full releases, which require a MANUAL run with channel=prod.
+#
 # Required secret (repo or org):
 #   ORCHESTRATOR_TOKEN — fine-grained PAT with
 #                          • Contents: READ        on Horde-Core/twinms-frontend
@@ -26,6 +31,14 @@ on:
       version:
         description: "Installer version (semver, e.g. 0.5.0). Blank = auto patch-bump."
         required: false
+      channel:
+        description: "develop = prerelease for testers only; prod = full release — ALL CLIENTS UPDATE"
+        required: false
+        type: choice
+        options:
+          - develop
+          - prod
+        default: develop
   repository_dispatch:
     types: [frontend-push, backend-release]
 
@@ -113,11 +126,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ORCHESTRATOR_TOKEN }}
         run: |
+          # Channel: manual input wins; auto-triggered (repository_dispatch) builds are always dev.
+          $channel = "${{ github.event.inputs.channel }}"
+          if (-not $channel) { $channel = "dev" }
           $ver = "${{ github.event.inputs.version }}"
           if (-not $ver) {
             $rels = gh release list --repo Horde-Core/twinms-releases --limit 100 --json tagName | ConvertFrom-Json
             $vers = $rels.tagName |
-              Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
+              Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |   # stable tags only — dev tags (v*-dev.N) never advance the base version
               ForEach-Object { [version]($_.TrimStart('v')) } |
               Sort-Object -Descending
             if ($vers) {
@@ -127,7 +143,18 @@ jobs:
               $ver = (Get-Content package.json -Raw | ConvertFrom-Json).version
             }
           }
-          Write-Host "Publishing version: $ver"
+          if ($channel -eq 'dev' -and $ver -notmatch '-') {
+            # The -dev suffix IS the channel switch: auto-update.js enables allowPrerelease
+            # only when the installed version has one. run_number keeps successive dev builds
+            # strictly increasing; the eventual prod x.y.z supersedes all its x.y.z-dev.N.
+            $ver = "$ver-dev.${{ github.run_number }}"
+          }
+          if ($channel -eq 'dev') {
+            # Read by electron-builder's GitHub publisher in the publish step below:
+            # forces the release to be created as a PRErelease (invisible to prod clients).
+            Add-Content $env:GITHUB_ENV 'EP_PRE_RELEASE=true'
+          }
+          Write-Host "Publishing version: $ver (channel: $channel)"
           npm version $ver --no-git-tag-version --allow-same-version
 
       - name: Assemble stack (stage prebuilt backend + binaries into vendor/)
