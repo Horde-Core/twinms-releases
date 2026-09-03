@@ -118,6 +118,20 @@ jobs:
           npm ci
           npm run build   # next build -> out/
 
+      # Obfuscate the app before packaging: electron main + renderer (out/), both in place.
+      # Guarded by Test-Path so frontend refs that predate the script still build. In place is
+      # fine here — the ephemeral CI checkout is discarded after, so no source restore is needed.
+      # Runs BEFORE the token inject so electron/update-token.js stays a clean plain file.
+      # javascript-obfuscator comes from the `npm ci` devDeps above.
+      - name: Obfuscate app (electron + renderer)
+        shell: pwsh
+        run: |
+          if (Test-Path scripts\obfuscate-app.js) {
+            node scripts/obfuscate-app.js
+          } else {
+            Write-Host "scripts/obfuscate-app.js not present on this ref - skipping obfuscation."
+          }
+
       # Decide the version to publish. A manual workflow_dispatch input wins; otherwise
       # auto patch-bump from the latest published v* release (the very first release
       # falls back to package.json's version). electron-updater needs strictly-increasing
