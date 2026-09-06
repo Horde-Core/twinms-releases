@@ -1,0 +1,9 @@
+# TwinMS update broker — Cloudflare Worker config.
+# Deploy from this folder:  npx wrangler deploy
+name = "twinms-updates"
+main = "src/worker.js"
+compatibility_date = "2025-09-01"
+
+# Secrets are NOT set here (never commit secrets). Set them with:
+#   npx wrangler secret put BROKER_KEY     # Layer A — the shared client key
+#   npx wrangler secret put GITHUB_TOKEN   # Layer B — fine-grained read PAT

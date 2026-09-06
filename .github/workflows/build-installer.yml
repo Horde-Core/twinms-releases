@@ -182,20 +182,21 @@ jobs:
           TWINMS_BACKEND_DIR: ${{ github.workspace }}\_backend
         run: node scripts/assemble-stack.js
 
-      # Embed the CLIENT update token so the installed app can read this PRIVATE feed.
-      # This is a SEPARATE, read-only PAT (Contents: read on twinms-releases only) — NOT
-      # the orchestrator token. It's written into electron/update-token.js (gitignored)
-      # right before packaging, so it ships inside the app but never lives in source.
-      - name: Inject read-only update token (embedded in the app)
+      # Embed the CLIENT broker key so the installed app can reach the update broker
+      # (a Cloudflare Worker) for updates + the first-run DB snapshot. This is a
+      # low-value shared key — NOT a GitHub token — validated by the broker, which holds
+      # the real GitHub read token server-side. Written into electron/update-key.js
+      # (gitignored) right before packaging, so it ships inside the app but never in source.
+      - name: Inject broker key (embedded in the app)
         shell: pwsh
         env:
-          UPDATE_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+          BROKER_KEY: ${{ secrets.BROKER_KEY }}
         run: |
-          if (-not $env:UPDATE_TOKEN) {
-            throw "UPDATE_TOKEN secret is missing. Create a fine-grained PAT with Contents: read on Horde-Core/twinms-releases and add it as the UPDATE_TOKEN secret."
+          if (-not $env:BROKER_KEY) {
+            throw "BROKER_KEY secret is missing. Add the TwinMS update-broker shared key as the BROKER_KEY secret."
           }
-          Set-Content -NoNewline -Path electron/update-token.js -Value "module.exports = '$($env:UPDATE_TOKEN)';"
-          Write-Host "Wrote electron/update-token.js (read-only client update token embedded)"
+          Set-Content -NoNewline -Path electron/update-key.js -Value "module.exports = '$($env:BROKER_KEY)';"
+          Write-Host "Wrote electron/update-key.js (broker key embedded)"
 
       - name: Build + publish installer
         shell: pwsh
