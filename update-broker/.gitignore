@@ -1,0 +1,3 @@
+# wrangler local cache/state (holds account id + login cache — never commit)
+.wrangler/
+node_modules/
