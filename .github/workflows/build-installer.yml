@@ -198,20 +198,10 @@ jobs:
           Set-Content -NoNewline -Path electron/update-key.js -Value "module.exports = '$($env:BROKER_KEY)';"
           Write-Host "Wrote electron/update-key.js (broker key embedded)"
 
-      # Embed the per-contract license token so the installed app can activate against
-      # the control plane (Plan 2). Written into electron/license-key.js (gitignored)
-      # right before packaging, same mechanism as the broker key above. Without it the
-      # app has no client token and boots straight to "Activation required".
-      - name: Inject client license token (embedded in the app)
-        shell: pwsh
-        env:
-          CLIENT_TOKEN: ${{ secrets.CLIENT_TOKEN }}
-        run: |
-          if (-not $env:CLIENT_TOKEN) {
-            throw "CLIENT_TOKEN secret is missing. Set it to the client's per-contract token from the control server's create-client CLI."
-          }
-          Set-Content -NoNewline -Path electron/license-key.js -Value "module.exports = '$($env:CLIENT_TOKEN)';"
-          Write-Host "Wrote electron/license-key.js (client license token embedded)"
+      # NOTE: builds are GENERIC — no client token is baked in. Per-client identity is
+      # provisioned at install time via a `<client>.twinmslicense` file dropped into the
+      # TwinMS-Data folder (downloaded from the control-plane admin), which the app imports
+      # and persists so it survives auto-updates. See TwinMS-License-Provisioning.md.
 
       - name: Build + publish installer
         shell: pwsh
