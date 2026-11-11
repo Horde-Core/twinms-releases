@@ -15,6 +15,8 @@ name: Build installer
 # auto-update); push to develop → develop channel (GitHub PRErelease, x.y.z-dev.N —
 # only installs whose own version has a -dev suffix follow it). backend-release
 # dispatches → develop; prod picks up the newest backend.zip at its next build.
+# The build checks out the commit the frontend tested (client_payload.sha, else the branch); prod and
+# develop queue separately; a re-run of a stale prod build is refused (it would ship old code as a newer version).
 #
 # Required secret (repo or org):
 #   ORCHESTRATOR_TOKEN — fine-grained PAT with
@@ -62,6 +64,21 @@ jobs:
           # The exact commit the frontend's CI tested; the branch name still picks the channel below.
           ref: ${{ github.event.inputs.frontend_ref || github.event.client_payload.sha || github.event.client_payload.ref || 'master' }}
           token: ${{ secrets.ORCHESTRATOR_TOKEN }}
+
+      - name: Refuse a re-run of a stale prod build
+        # A re-run (run_attempt > 1) reuses the original payload's sha, but the version is recomputed
+        # from the live release list: old code would ship as a newer version to every client.
+        if: ${{ github.event.client_payload.sha && github.event.client_payload.ref == 'master' && github.run_attempt != '1' }}
+        shell: pwsh
+        env:
+          SHA: ${{ github.event.client_payload.sha }}
+        run: |
+          $line = git ls-remote origin refs/heads/master
+          if ($LASTEXITCODE -ne 0 -or -not $line) { throw "Could not read master's tip from origin." }
+          $tip = ($line -split '\s+')[0]
+          if ($tip -ne $env:SHA) {
+            throw "Re-run of a stale prod build: master moved to $tip after $env:SHA was tested. Push or dispatch a new build instead."
+          }
 
       - name: Set up Node
         uses: actions/setup-node@v4
