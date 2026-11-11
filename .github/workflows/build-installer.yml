@@ -44,7 +44,8 @@ on:
     types: [frontend-push, backend-release]
 
 concurrency:
-  group: build-installer
+  # One queue per channel: a develop build can no longer replace a queued prod build.
+  group: build-installer-${{ github.event.inputs.channel || (github.event.client_payload.ref == 'master' && 'prod') || 'develop' }}
   cancel-in-progress: false
 
 jobs:
@@ -58,7 +59,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Horde-Core/twinms-frontend
-          ref: ${{ github.event.inputs.frontend_ref || github.event.client_payload.ref || 'master' }}
+          # The exact commit the frontend's CI tested; the branch name still picks the channel below.
+          ref: ${{ github.event.inputs.frontend_ref || github.event.client_payload.sha || github.event.client_payload.ref || 'master' }}
           token: ${{ secrets.ORCHESTRATOR_TOKEN }}
 
       - name: Set up Node
